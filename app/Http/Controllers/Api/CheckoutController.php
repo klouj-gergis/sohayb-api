@@ -6,12 +6,17 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use App\Http\Resources\OrderResource;
-use App\Models\Cart;
-use App\Enums\OrderStatus;
-use App\Enums\PaymentStatus;
+use App\Services\OrderService;
 
 class CheckoutController extends Controller
 {
+
+    protected $orderService;
+    public function __construct(OrderService $orderService)
+    {
+        $this->orderService = $orderService;
+    }
+
     public function checkout(Request $request)
     {
         $data = $request->validate([
@@ -21,77 +26,42 @@ class CheckoutController extends Controller
             'payment_method' => 'nullable|string|max:50',
             'notes' => 'nullable|string|max:500',
         ]);
-        // Implement checkout logic here
+
         $user = $request->user();
-        $cartItems = $user->carts()->with('product')->get();
-        $subtotal = 0;
-        $items = [];
-        foreach ($cartItems as $item) {
-            $product = $item->product;
-            if($product->stock < $item->quantity) {
-                return response()->json(['message' => "not enogh stock to {$product->name}"]);
-            }
-            $itemSubtotal = round($product->price * $item->quantity, 2);
-            $subtotal += $itemSubtotal;
-
-            $items[] = [
-                'product_id' => $item->product_id,
-                'quantity' => $item->quantity,
-                'price' => $product->price,
-                'subtotal' => $itemSubtotal,
-            ];
-        };
-
-        $tax = round($subtotal * 0.1, 2); // Assuming a 10% tax rate
-        $shippingCost = 5.00; // Flat shipping cost
-        $total = round($subtotal + $tax + $shippingCost, 2);
 
         DB::beginTransaction();
-        try{
-            $order = $user->orders()->create([
-                'status' => OrderStatus::PENDING,
-                'shipping_name' => $data['shipping_name'],
-                'shipping_phone' => $data['shipping_phone'],
-                'subtotal' => $subtotal,
-                'tax' => $tax,
-                'shipping_cost' => $shippingCost,
-                'total' => $total,
-                'shipping_address' => $data['shipping_address'],
-                'payment_method' => $data['payment_method'] ?? 'cod',
-                'payment_status' => PaymentStatus::PENDING,
-                'order_number' => uniqid('order_'),
-                'notes' => $data['notes'] ?? null,
-            ]);
+        try {
+            // 1. Validate cart and calculate all prices
+            $cartData = $this->orderService->validateCart($user); // contains cartItems, subtotal, tax, shippingCost, total
 
-            foreach ($items as $item) {
-                $order->items()->create($item);
-            }
+            // 2. Create order and related items
+            $order = $this->orderService->createOrder(
+                $user,
+                $data,
+                $cartData['cartItems'],
+                $cartData['total'],
+                $cartData['subTotal'],
+                $cartData['tax'],
+                $cartData['shippingCost']
+            );
 
-            // Update product stock
-            foreach ($cartItems as $cartItem) {
-                $product = $cartItem->product;
-                $product->stock -= $cartItem->quantity;
-                $product->save();
-            }
-
-            // Clear the cart after successful checkout
-            Cart::where('user_id', $user->id)->each(function ($cartItem) {
-                $cartItem->delete();
-            });
+            // 3. Optionally: integrate Paymob here if needed
 
             DB::commit();
+
             return response()->json([
                 'message' => 'Order placed successfully',
                 'order' => new OrderResource($order->load('items')),
                 'status' => 'success',
             ], 201);
-        }catch (\Exception $e) {
+        } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json(['message' => 'Checkout failed', 'error' => $e->getMessage()], 500);
+            
+            return response()->json([
+                'message' => 'Checkout failed',
+                'error' => $e->getMessage()
+            ], 500);
         }
-        // This could include validating the request, processing payment, etc.
-
-        return response()->json(['message' => 'Order placed successfully'], 200);
     }
 
     public function orderHistory(Request $request)

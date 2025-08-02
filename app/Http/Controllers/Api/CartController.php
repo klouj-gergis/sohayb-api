@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use App\Http\Resources\CartResource;
 use App\Models\Cart;
+use App\Models\Product;
 
 
 class CartController extends Controller
@@ -38,11 +39,28 @@ class CartController extends Controller
             'product_id' => 'required|exists:products,id',
             'quantity' => 'required|integer|min:1',
         ]);
-        $cart = Auth::user()->carts()->create([
+        $product = Product::findOrFail($request->product_id);
+        if( $product->stock < $request->quantity) {
+            return response()->json(['error' => 'Insufficient stock'], 400);
+        }
+        // Check if the product already exists in the cart
+        $item = Cart::where('product_id', $request->product_id)
+            ->where('user_id', Auth::id())
+            ->first();
+        if ($item) {
+            // If it exists, update the quantity
+            $item->quantity += $request->quantity;
+            $item->save();
+            return response()->json(new CartResource($item), 200);
+        }
+        $cart = $request->user()->carts()->create([
+            'user_id' => $request->user()->id,
             'product_id' => $request->product_id,
             'quantity' => $request->quantity,
         ]);
-        return response()->json(new CartResource($cart), 201);
+        // Return the newly created cart item
+         // Load the product relationship
+        return response()->json(new CartResource($$cart->load('product')), 201);
     }
 
     /**
